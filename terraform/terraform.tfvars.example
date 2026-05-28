@@ -1,0 +1,14 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is gitignored — never commit secrets.
+
+aiven_project     = "my-aiven-project"
+custom_cloud_name = "byoc-gcp-europe-west1-xxxxxxxx"
+service_name      = "inkless-benchmark"
+kafka_plan        = "business-8-inkless"
+kafka_version     = "3.8"
+
+topic_name        = "inkless-benchmark-topic"
+topic_partitions  = 6
+topic_replication = 3
+
+benchmark_username = "benchmark-user"

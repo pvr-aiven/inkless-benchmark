@@ -2,31 +2,45 @@
 
 Measures the time required to upgrade and downgrade an [Aiven Kafka Inkless](https://aiven.io/docs/products/kafka/concepts/kafka-inkless) cluster plan while a continuous workload is running, and captures the full impact on producer throughput and consumer lag.
 
+## Inkless Professional Plan Offerings
+
+| Plan                          | Max Ingress | Max Egress |
+|-------------------------------|-------------|------------|
+| inkless-professional-3x-8-1   | 1 MB/s      | 3 MB/s     |
+| inkless-professional-3x-8-2   | 3 MB/s      | 9 MB/s     |
+| inkless-professional-3x-8-3   | 5 MB/s      | 15 MB/s    |
+| inkless-professional-3x-16-4  | 10 MB/s     | 30 MB/s    |
+| inkless-professional-3x-16-5  | 25 MB/s     | 75 MB/s    |
+| inkless-professional-3x-16-6  | 50 MB/s     | 150 MB/s   |
+| inkless-professional-6x-16-7  | 100 MB/s    | 300 MB/s   |
+| inkless-professional-9x-16-8  | 200 MB/s    | 600 MB/s   |
+| inkless-professional-6x-32-9  | 300 MB/s    | 900 MB/s   |
+
 ## Overview
 
-| Dimension        | Values                                          |
-|------------------|-------------------------------------------------|
-| Initial plan     | `business-8-inkless`                            |
-| Upgraded plan    | `business-16-inkless`                           |
-| Throughputs      | 1 MB/s and 5 MB/s                               |
-| Directions       | upgrade and downgrade (full round-trip per run) |
-| Cloud            | BYOC GCP — europe-west1                         |
+The benchmark performs a full round-trip (upgrade then downgrade) for each configured throughput value. By default:
+
+| Parameter     | Default value                    |
+|---------------|----------------------------------|
+| From plan     | `inkless-professional-3x-8-1`    |
+| To plan       | `inkless-professional-3x-8-3`    |
+| Throughputs   | 1 MB/s and 5 MB/s                |
+| Cloud         | `google-europe-west1` (standard) |
 
 Each run sequence:
 1. Start producer at target MB/s + consumer tracking lag
 2. Stabilization period (default: 30 s)
-3. Trigger plan change via Aiven API
-4. Poll service state until `RUNNING` — record duration
-5. Stabilization period
-6. Stop producer and consumer
-7. Persist metrics to `results/`
+3. Trigger plan change via Aiven API → record migration duration
+4. Stabilization period
+5. Trigger reverse plan change → record migration duration
+6. Persist metrics to `results/`
 
 ## Project Structure
 
 ```
 inkless-benchmark/
 ├── terraform/
-│   ├── main.tf                   # Aiven Kafka Inkless service (BYOC)
+│   ├── main.tf                   # Aiven Kafka Inkless service
 │   ├── variables.tf
 │   ├── outputs.tf
 │   └── terraform.tfvars.example
@@ -47,9 +61,7 @@ inkless-benchmark/
 
 - Terraform >= 1.5
 - Python >= 3.10
-- An Aiven account with:
-  - A BYOC custom cloud already configured on GCP europe-west1 (VPC peering done)
-  - An API token with write access to the target project
+- An Aiven account with an API token that has write access to the target project
 
 ## Quick Start
 
@@ -57,14 +69,14 @@ inkless-benchmark/
 
 ```bash
 cp .env.example .env
-# Edit .env — fill in AIVEN_TOKEN, TF_VAR_aiven_project, TF_VAR_custom_cloud_name
+# Edit .env — fill in AIVEN_TOKEN and TF_VAR_aiven_project
 ```
 
 ### 2. Configure Terraform variables
 
 ```bash
 cp terraform/terraform.tfvars.example terraform/terraform.tfvars
-# Edit terraform/terraform.tfvars to match your project and custom cloud name
+# Edit terraform/terraform.tfvars to set your project and desired starting plan
 ```
 
 ### 3. Install dependencies
@@ -80,26 +92,39 @@ make init
 make deploy
 ```
 
-This provisions an `business-8-inkless` Kafka service on your BYOC GCP cloud, creates the benchmark topic and user, and outputs the connection parameters.
+Provisions an `inkless-professional-3x-8-1` Kafka service on `google-europe-west1`, creates the benchmark topic and user, and writes connection parameters to Terraform state.
 
 ### 5. Run the benchmark
+
+Default scenario (1 MB/s and 5 MB/s, plan-1 ↔ plan-3):
 
 ```bash
 make benchmark
 ```
 
-Runs both throughputs (1 MB/s and 5 MB/s), each with an upgrade (`business-8-inkless` → `business-16-inkless`) followed by a downgrade. Raw metrics are saved to `results/`.
+Custom plan pair — e.g. testing the 5 MB/s → 10 MB/s boundary:
 
-To run a quick single-throughput test:
+```bash
+make benchmark \
+  FROM_PLAN=inkless-professional-3x-8-3 \
+  TO_PLAN=inkless-professional-3x-16-4 \
+  THROUGHPUT="3 5"
+```
+
+Quick smoke test (1 MB/s, 10 s stabilization):
 
 ```bash
 make benchmark-quick
 ```
 
-Custom throughput or stabilization period:
+Full CLI reference:
 
-```bash
-make benchmark THROUGHPUT="1 5" STABILIZATION=60
+```
+python -m benchmark.runner \
+    --from-plan  inkless-professional-3x-8-1   # starting plan
+    --to-plan    inkless-professional-3x-8-3   # upgrade target
+    --throughput 1 5                            # one run per value (MB/s)
+    --stabilization 30                          # seconds before/after each migration
 ```
 
 ### 6. Generate the report
@@ -127,8 +152,8 @@ make destroy
 | Column            | Description                                  |
 |-------------------|----------------------------------------------|
 | `timestamp`       | Unix epoch of the sample                     |
-| `messages_sent`   | Cumulative messages successfully acked        |
-| `bytes_sent`      | Cumulative bytes acked                        |
+| `messages_sent`   | Cumulative messages successfully acked       |
+| `bytes_sent`      | Cumulative bytes acked                       |
 | `errors`          | Cumulative delivery errors                   |
 | `latency_ms`      | Average ack latency for this window (ms)     |
 | `throughput_mbps` | Actual MB/s achieved in this window          |
@@ -150,10 +175,14 @@ make destroy
 | `direction`       | `upgrade` or `downgrade`                           |
 | `from_plan`       | Source plan                                        |
 | `to_plan`         | Target plan                                        |
-| `trigger_ts`      | Unix timestamp of the API PATCH request            |
+| `trigger_ts`      | Unix timestamp of the API PUT request              |
 | `duration_sec`    | Seconds from trigger to service `RUNNING`          |
 | `throughput_mbps` | Producer throughput during this run                |
 
 ## How Plan Changes Are Triggered
 
-The benchmark runner calls the Aiven REST API directly (`PATCH /v1/project/{project}/service/{service}`) rather than re-running `terraform apply`. This gives a precise timestamp for migration duration measurement. Terraform is used only for initial provisioning and teardown.
+The benchmark runner calls the Aiven REST API directly (`PUT /v1/project/{project}/service/{service}`) rather than re-running `terraform apply`. This gives a precise timestamp for migration duration measurement and avoids Terraform state drift. Terraform is used only for initial provisioning and teardown.
+
+The poller uses a two-phase approach to avoid a race condition:
+1. Wait for the service to leave `RUNNING` (migration has started)
+2. Wait for the service to return to `RUNNING` (migration complete)

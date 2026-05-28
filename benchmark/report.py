@@ -66,9 +66,11 @@ def load_consumer_csv(path: Path) -> List[dict]:
 def load_migration_events(path: Path) -> List[dict]:
     rows = _load_csv(path)
     for r in rows:
-        r["trigger_ts"]    = float(r["trigger_ts"])
-        r["duration_sec"]  = float(r["duration_sec"])
-        r["throughput_mbps"] = float(r["throughput_mbps"])
+        r["trigger_ts"]                      = float(r["trigger_ts"])
+        r["duration_sec"]                    = float(r["duration_sec"])
+        r["throughput_mbps"]                 = float(r["throughput_mbps"])
+        r["data_ingested_during_migration_mb"] = float(r.get("data_ingested_during_migration_mb", 0))
+        r["cloud_name"]                      = r.get("cloud_name", "unknown")
     return rows
 
 
@@ -183,27 +185,61 @@ def plot_migration_duration_bars(events: List[dict], output_path: Path) -> None:
 # ─── Markdown summary ─────────────────────────────────────────────────────────
 
 def write_markdown_summary(events: List[dict], output_path: Path) -> None:
+    import datetime
+
+    # Derive shared context from the first event
+    cloud = events[0]["cloud_name"] if events else "unknown"
+    # Parse hyperscaler and region from cloud_name (e.g. "google-europe-west1")
+    parts = cloud.split("-", 1)
+    hyperscaler = parts[0].capitalize() if parts else cloud
+    region      = parts[1] if len(parts) > 1 else cloud
+
+    run_date = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
     lines = [
         "# Inkless Plan Migration Benchmark — Summary",
         "",
-        "## Migration Duration",
+        "## Run context",
         "",
-        "| Direction  | From Plan            | To Plan              | Throughput (MB/s) | Duration (s) |",
-        "|------------|----------------------|----------------------|-------------------|--------------|",
+        f"| Parameter    | Value |",
+        f"|--------------|-------|",
+        f"| Date         | {run_date} |",
+        f"| Hyperscaler  | {hyperscaler} |",
+        f"| Region       | {region} |",
+        f"| Cloud name   | `{cloud}` |",
+        f"| From plan    | `{events[0]['from_plan']}` |" if events else "",
+        f"| To plan      | `{events[0]['to_plan']}` |" if events else "",
+        "",
+        "## Migration results",
+        "",
+        "> **Migration duration** = time from the Aiven API request to the service returning to `RUNNING` state.",
+        "> **Data ingested during migration** = `duration × ingress throughput` — the volume of data",
+        "> written to the cluster while it was migrating. Higher values indicate a more demanding migration.",
+        "",
+        "| Direction  | From plan                     | To plan                       |"
+        " Ingress (MB/s) | Duration (s) | Data ingested during migration (MB) |",
+        "|------------|-------------------------------|-------------------------------|"
+        "----------------|--------------|-------------------------------------|",
     ]
+
     for e in events:
         lines.append(
-            f"| {e['direction']:<10} | {e['from_plan']:<20} | {e['to_plan']:<20} "
-            f"| {e['throughput_mbps']:>17.1f} | {e['duration_sec']:>12.1f} |"
+            f"| {e['direction']:<10} "
+            f"| `{e['from_plan']}`{' ' * max(0, 29 - len(e['from_plan']))} "
+            f"| `{e['to_plan']}`{' ' * max(0, 29 - len(e['to_plan']))} "
+            f"| {e['throughput_mbps']:>14.1f} "
+            f"| {e['duration_sec']:>12.1f} "
+            f"| {e['data_ingested_during_migration_mb']:>35.1f} |"
         )
 
     lines += [
         "",
         "## Notes",
         "",
-        "- Migration duration is measured from the Aiven API PATCH request to the service",
-        "  returning to `RUNNING` state.",
-        "- Producer throughput and consumer lag details are in the accompanying CSVs and plots.",
+        "- Duration is measured server-side: from the API `PUT /service/{name}` request",
+        "  to the service state returning to `RUNNING` (polled every 15 s).",
+        "- Producer throughput, consumer lag, and end-to-end latency details are in the",
+        "  accompanying CSV files and PNG plots.",
         "",
     ]
 

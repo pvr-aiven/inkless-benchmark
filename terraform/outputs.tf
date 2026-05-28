@@ -61,6 +61,11 @@ output "current_plan" {
   value       = aiven_kafka.inkless.plan
 }
 
+output "cloud_name" {
+  description = "Aiven cloud / region where the service is deployed (e.g. google-europe-west1)"
+  value       = aiven_kafka.inkless.cloud_name
+}
+
 # ─── Topic ───────────────────────────────────────────────────────────────────
 output "topic_name" {
   description = "Benchmark Kafka topic name"

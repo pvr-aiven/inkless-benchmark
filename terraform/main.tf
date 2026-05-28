@@ -5,7 +5,7 @@ terraform {
   required_providers {
     aiven = {
       source  = "aiven/aiven"
-      version = "~> 4.0"
+      version = "~> 4.40"  # diskless_enable on aiven_kafka_topic requires >= 4.40
     }
   }
 }
@@ -20,23 +20,29 @@ data "aiven_project" "main" {
   project = var.aiven_project
 }
 
-# ─── Kafka Service (Inkless, BYOC GCP europe-west1) ─────────────────────────
+# ─── Kafka Service (Inkless, standard Aiven cloud) ───────────────────────────
 resource "aiven_kafka" "inkless" {
   project      = var.aiven_project
-  cloud_name   = var.custom_cloud_name
+  cloud_name   = var.cloud_name
   plan         = var.kafka_plan
   service_name = var.service_name
 
   kafka_user_config {
     kafka_version = var.kafka_version
 
-    # Required for Inkless plans — enables diskless (object-storage-backed) mode
-    kafka_diskless {
+    # Required for Inkless Professional plans.
+    inkless {
       enabled = true
     }
 
-    # Tiered storage must be enabled alongside diskless for Inkless plans
     tiered_storage {
+      enabled = true
+    }
+
+    # Enables diskless topic creation on the service.
+    # Required before any aiven_kafka_topic with diskless_enable=true can be created.
+    # Also requires kafka_version >= 4.0 (set in variables.tf).
+    kafka_diskless {
       enabled = true
     }
 
@@ -59,17 +65,21 @@ resource "aiven_kafka_topic" "benchmark" {
   service_name = aiven_kafka.inkless.service_name
   topic_name   = var.topic_name
   partitions   = var.topic_partitions
-  replication  = var.topic_replication
+
+  # Diskless topics do not use broker-managed replication — replication must be 1.
+  replication = 1
 
   config {
+    # diskless_enable = true marks the topic as diskless (Inkless) at creation time.
+    # Data is stored directly in cloud object storage, bypassing local broker disks.
+    # Immutable: cannot be changed after topic creation.
+    # Requires provider >= 4.40. Run `terraform init -upgrade` if the apply fails.
+    diskless_enable = true
+
     # Retain data for 24 h — enough for the full benchmark run
-    retention_ms      = "86400000"
-    # Unlimited retention bytes (rely on time-based retention)
-    retention_bytes   = "-1"
-    # Compact + delete: keep last value per key and purge old segments
-    cleanup_policy    = "delete"
-    # 64 MB segment size — balanced for Inkless object-storage writes
-    segment_bytes     = "67108864"
+    retention_ms    = "86400000"
+    retention_bytes = "-1"
+    cleanup_policy  = "delete"
   }
 }
 

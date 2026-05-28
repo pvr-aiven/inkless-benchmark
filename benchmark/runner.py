@@ -3,17 +3,34 @@ Benchmark runner — main orchestrator.
 
 Workflow for each (throughput, direction) combination:
   1. Read Terraform outputs to get connection parameters.
-  2. Fetch CA certificate from the Aiven API.
-  3. Start producer and consumer threads.
-  4. Wait for a stabilization period.
-  5. Trigger the plan change (upgrade or downgrade) via the Aiven API.
-  6. Poll until the service is RUNNING again; record migration duration.
-  7. Wait for another stabilization period, then stop producer and consumer.
-  8. Persist raw metrics to CSV in the results/ directory.
-  9. Repeat for the reverse direction.
+  2. Start producer and consumer threads.
+  3. Wait for a stabilization period.
+  4. Trigger the plan change (upgrade) via the Aiven API.
+  5. Poll until the service is RUNNING again; record migration duration.
+  6. Wait for another stabilization period.
+  7. Trigger the reverse plan change (downgrade).
+  8. Poll until RUNNING again; record migration duration.
+  9. Persist raw metrics to CSV in the results/ directory.
 
 Usage (from the project root):
-    python -m benchmark.runner [--throughput 1 5] [--stabilization 30]
+    python -m benchmark.runner \\
+        --from-plan inkless-professional-3x-8-1 \\
+        --to-plan   inkless-professional-3x-8-3 \\
+        --throughput 1 5 \\
+        --stabilization 30
+
+Available Inkless Professional plans and their ingress/egress limits:
+
+  Plan                          Max Ingress  Max Egress
+  inkless-professional-3x-8-1   1 MB/s        3 MB/s
+  inkless-professional-3x-8-2   3 MB/s        9 MB/s
+  inkless-professional-3x-8-3   5 MB/s       15 MB/s
+  inkless-professional-3x-16-4  10 MB/s      30 MB/s
+  inkless-professional-3x-16-5  25 MB/s      75 MB/s
+  inkless-professional-3x-16-6  50 MB/s     150 MB/s
+  inkless-professional-6x-16-7  100 MB/s    300 MB/s
+  inkless-professional-9x-16-8  200 MB/s    600 MB/s
+  inkless-professional-6x-32-9  300 MB/s    900 MB/s
 """
 
 from __future__ import annotations
@@ -43,10 +60,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-# ─── Plan configuration ───────────────────────────────────────────────────────
-INITIAL_PLAN  = "business-8-inkless"
-UPGRADED_PLAN = "business-16-inkless"
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -192,6 +205,7 @@ def save_migration_event(events: list, path: Path) -> None:
         writer.writerow([
             "direction", "from_plan", "to_plan",
             "trigger_ts", "duration_sec", "throughput_mbps",
+            "data_ingested_during_migration_mb", "cloud_name",
         ])
         writer.writerows(events)
     logger.info("Migration events saved → %s", path)
@@ -289,10 +303,29 @@ def run_single_benchmark(
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Inkless plan migration benchmark runner")
+    parser = argparse.ArgumentParser(
+        description="Inkless plan migration benchmark runner",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--from-plan",
+        default="inkless-professional-3x-8-1",
+        help=(
+            "Starting Inkless plan (default: inkless-professional-3x-8-1). "
+            "The benchmark upgrades from this plan to --to-plan, then downgrades back."
+        ),
+    )
+    parser.add_argument(
+        "--to-plan",
+        default="inkless-professional-3x-8-3",
+        help=(
+            "Target Inkless plan for the upgrade leg (default: inkless-professional-3x-8-3). "
+            "See the module docstring for the full plan table."
+        ),
+    )
     parser.add_argument(
         "--throughput", nargs="+", type=float, default=[1.0, 5.0],
-        help="Target producer throughput in MB/s (default: 1 5)",
+        help="Target producer throughput in MB/s — one run per value (default: 1 5)",
     )
     parser.add_argument(
         "--stabilization", type=int, default=30,
@@ -300,18 +333,28 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    initial_plan  = args.from_plan
+    upgraded_plan = args.to_plan
+
     # ── Load environment ──────────────────────────────────────────────────────
     env = load_env()
     outputs = get_terraform_outputs()
 
     service_name = outputs["service_name"]
-    topic = outputs["topic_name"]
+    topic        = outputs["topic_name"]
     aiven_project = outputs["aiven_project"]
+    cloud_name   = outputs.get("cloud_name", "unknown")
 
-    logger.info("Service: %s | Topic: %s | Project: %s", service_name, topic, aiven_project)
+    logger.info("Service: %s | Topic: %s | Project: %s | Cloud: %s",
+                service_name, topic, aiven_project, cloud_name)
 
     # ── Aiven API client ──────────────────────────────────────────────────────
     client = AivenClient(token=env["token"], project=aiven_project)
+
+    # ── Ensure diskless is enabled at service level ───────────────────────────
+    # kafka_diskless.enabled=true must be set on the service before diskless topics
+    # can be created. This is idempotent — no-op if already enabled.
+    client.ensure_service_diskless(service_name)
 
     # ── Write SSL files (CA cert + client cert/key from Terraform outputs) ────
     ca_cert_path, client_cert_path, client_key_path = write_ssl_files(outputs)
@@ -323,11 +366,13 @@ def main() -> None:
     # ── Verify initial plan ───────────────────────────────────────────────────
     current_plan = client.get_current_plan(service_name)
     logger.info("Current service plan: %s", current_plan)
-    if current_plan != INITIAL_PLAN:
+    logger.info("Benchmark plan pair: %s → %s (upgrade), %s → %s (downgrade)",
+                initial_plan, upgraded_plan, upgraded_plan, initial_plan)
+    if current_plan != initial_plan:
         logger.warning(
             "Expected initial plan %s but got %s. "
-            "Ensure the service is at the initial plan before running.",
-            INITIAL_PLAN, current_plan,
+            "Ensure the service is at --from-plan before running.",
+            initial_plan, current_plan,
         )
 
     # ── Run all combinations ──────────────────────────────────────────────────
@@ -337,8 +382,8 @@ def main() -> None:
     for mbps in args.throughput:
         # Round-trip: upgrade then downgrade
         for direction, from_plan, to_plan in [
-            ("upgrade",   INITIAL_PLAN,  UPGRADED_PLAN),
-            ("downgrade", UPGRADED_PLAN, INITIAL_PLAN),
+            ("upgrade",   initial_plan,  upgraded_plan),
+            ("downgrade", upgraded_plan, initial_plan),
         ]:
             label = f"{direction}_{int(mbps)}mbps"
             summary = run_single_benchmark(
@@ -355,9 +400,11 @@ def main() -> None:
                 run_label=label,
             )
             all_summaries.append(summary)
+            data_ingested_mb = round(summary["migration_duration_sec"] * mbps, 2)
             migration_events.append([
                 direction, from_plan, to_plan,
                 summary["trigger_ts"], summary["migration_duration_sec"], mbps,
+                data_ingested_mb, cloud_name,
             ])
 
             # Brief pause between consecutive migrations

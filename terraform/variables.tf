@@ -12,9 +12,10 @@ variable "aiven_project" {
   type        = string
 }
 
-variable "custom_cloud_name" {
-  description = "Aiven BYOC custom cloud identifier (e.g. byoc-gcp-europe-west1-xxxxxx)"
+variable "cloud_name" {
+  description = "Aiven cloud region (standard deployment, e.g. google-europe-west1)"
   type        = string
+  default     = "google-europe-west1"
 }
 
 # ─── Service ────────────────────────────────────────────────────────────────
@@ -25,15 +26,15 @@ variable "service_name" {
 }
 
 variable "kafka_plan" {
-  description = "Aiven Kafka plan to provision initially (upgrade/downgrade is handled by the benchmark runner)"
+  description = "Aiven Kafka Inkless plan to provision initially (upgrade/downgrade handled by benchmark runner)"
   type        = string
-  default     = "business-8-inkless"
+  default     = "inkless-professional-3x-8-1"
 }
 
 variable "kafka_version" {
-  description = "Kafka version to deploy"
+  description = "Kafka version to deploy (must be >= 4.0 for diskless topics)"
   type        = string
-  default     = "3.8"
+  default     = "4.1"
 }
 
 # ─── Topic ──────────────────────────────────────────────────────────────────
@@ -50,9 +51,9 @@ variable "topic_partitions" {
 }
 
 variable "topic_replication" {
-  description = "Replication factor for the benchmark topic"
+  description = "Replication factor for the benchmark topic (not used — diskless topics require replication = 1, hardcoded in main.tf)"
   type        = number
-  default     = 3
+  default     = 1
 }
 
 # ─── Benchmark user ─────────────────────────────────────────────────────────

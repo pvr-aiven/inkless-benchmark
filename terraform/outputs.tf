@@ -32,10 +32,28 @@ output "kafka_password" {
   sensitive   = true
 }
 
+output "kafka_access_cert" {
+  description = "Client certificate PEM for mTLS authentication"
+  value       = aiven_kafka_user.benchmark.access_cert
+  sensitive   = true
+}
+
+output "kafka_access_key" {
+  description = "Client private key PEM for mTLS authentication"
+  value       = aiven_kafka_user.benchmark.access_key
+  sensitive   = true
+}
+
 # ─── Project context (needed by the runner to call the Aiven API) ────────────
 output "aiven_project" {
   description = "Aiven project name"
   value       = var.aiven_project
+}
+
+output "ca_cert" {
+  description = "Project CA certificate PEM (used for SSL connections to Kafka)"
+  value       = data.aiven_project.main.ca_cert
+  sensitive   = true
 }
 
 output "current_plan" {

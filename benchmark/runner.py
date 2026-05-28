@@ -52,7 +52,7 @@ UPGRADED_PLAN = "business-16-inkless"
 PROJECT_ROOT = Path(__file__).parent.parent
 TERRAFORM_DIR = PROJECT_ROOT / "terraform"
 RESULTS_DIR = PROJECT_ROOT / "results"
-CA_CERT_PATH = PROJECT_ROOT / "results" / "ca.pem"
+CA_CERT_PATH     = PROJECT_ROOT / "results" / "ca.pem"      # written by write_ssl_files
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -93,38 +93,64 @@ def get_terraform_outputs() -> dict:
     return {k: v["value"] for k, v in raw.items()}
 
 
-def write_ca_cert(cert_pem: str) -> str:
-    """Write the CA certificate PEM to a file and return its path."""
+CLIENT_CERT_PATH = PROJECT_ROOT / "results" / "client.cert"
+CLIENT_KEY_PATH  = PROJECT_ROOT / "results" / "client.key"
+
+
+def write_ssl_files(outputs: dict) -> tuple[str, str, str]:
+    """
+    Write the CA cert, client cert, and client key PEM files to results/.
+
+    Aiven Kafka uses mutual TLS (mTLS): the server validates the client
+    certificate in addition to the CA. All three files come from Terraform
+    outputs so no manual download is needed.
+
+    Returns (ca_cert_path, client_cert_path, client_key_path).
+    """
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    CA_CERT_PATH.write_text(cert_pem)
-    logger.info("CA certificate written to %s", CA_CERT_PATH)
-    return str(CA_CERT_PATH)
+
+    CA_CERT_PATH.write_text(outputs["ca_cert"])
+    logger.info("CA cert written to %s", CA_CERT_PATH)
+
+    CLIENT_CERT_PATH.write_text(outputs["kafka_access_cert"])
+    logger.info("Client cert written to %s", CLIENT_CERT_PATH)
+
+    CLIENT_KEY_PATH.write_text(outputs["kafka_access_key"])
+    logger.info("Client key written to %s", CLIENT_KEY_PATH)
+
+    return str(CA_CERT_PATH), str(CLIENT_CERT_PATH), str(CLIENT_KEY_PATH)
 
 
-def build_kafka_conf(outputs: dict, ca_cert_path: str) -> dict:
-    """
-    Build a confluent-kafka configuration dict from Terraform outputs.
-
-    Uses SSL with username/password (SASL_SSL PLAIN) — the standard
-    authentication mode for Aiven Kafka.
-    """
+def _base_ssl_conf(outputs: dict, ca_cert_path: str, client_cert_path: str, client_key_path: str) -> dict:
+    """Shared mTLS settings used by both producer and consumer."""
     return {
         "bootstrap.servers": outputs["bootstrap_servers"],
         "security.protocol": "SSL",
         "ssl.ca.location": ca_cert_path,
-        "ssl.endpoint.identification.algorithm": "https",
-        # Aiven Kafka also supports SASL_SSL; use SSL cert auth here
-        # (the benchmark user cert is not provisioned via Terraform so
-        #  we rely on the service URI credentials mapped below)
-        "sasl.mechanism": "PLAIN",
-        "security.protocol": "SASL_SSL",
-        "sasl.username": outputs["kafka_username"],
-        "sasl.password": outputs["kafka_password"],
-        # Producer-side reliability settings
+        "ssl.certificate.location": client_cert_path,
+        "ssl.key.location": client_key_path,
+    }
+
+
+def build_producer_conf(outputs: dict, ca_cert_path: str, client_cert_path: str, client_key_path: str) -> dict:
+    """
+    Kafka producer configuration.
+
+    Aiven Kafka requires mutual TLS (mTLS): security.protocol=SSL with
+    the project CA cert plus the per-user client certificate and key.
+    Producer-specific reliability settings are added on top of the base SSL conf.
+    """
+    return {
+        **_base_ssl_conf(outputs, ca_cert_path, client_cert_path, client_key_path),
         "acks": "all",
         "retries": 10,
         "retry.backoff.ms": 500,
     }
+
+
+def build_consumer_conf(outputs: dict, ca_cert_path: str, client_cert_path: str, client_key_path: str) -> dict:
+    """Kafka consumer configuration (mTLS only — no producer-specific keys)."""
+    return _base_ssl_conf(outputs, ca_cert_path, client_cert_path, client_key_path)
 
 
 def save_producer_metrics(metrics: List[ProducerMetric], path: Path) -> None:
@@ -179,7 +205,8 @@ def run_single_benchmark(
     from_plan: str,
     to_plan: str,
     direction: str,           # "upgrade" or "downgrade"
-    kafka_conf: dict,
+    producer_conf: dict,
+    consumer_conf: dict,
     topic: str,
     aiven_client: AivenClient,
     service_name: str,
@@ -199,8 +226,8 @@ def run_single_benchmark(
     producer_metrics: List[ProducerMetric] = []
     consumer_metrics: List[ConsumerMetric] = []
 
-    producer = BenchmarkProducer(kafka_conf, topic, throughput_mbps, metrics=producer_metrics)
-    consumer = BenchmarkConsumer(kafka_conf, topic, metrics=consumer_metrics)
+    producer = BenchmarkProducer(producer_conf, topic, throughput_mbps, metrics=producer_metrics)
+    consumer = BenchmarkConsumer(consumer_conf, topic, metrics=consumer_metrics)
 
     try:
         # 1. Start producer and consumer
@@ -286,12 +313,12 @@ def main() -> None:
     # ── Aiven API client ──────────────────────────────────────────────────────
     client = AivenClient(token=env["token"], project=aiven_project)
 
-    # ── Fetch CA certificate ──────────────────────────────────────────────────
-    ca_pem = client.get_ca_cert(service_name)
-    ca_cert_path = write_ca_cert(ca_pem)
+    # ── Write SSL files (CA cert + client cert/key from Terraform outputs) ────
+    ca_cert_path, client_cert_path, client_key_path = write_ssl_files(outputs)
 
-    # ── Build Kafka config ────────────────────────────────────────────────────
-    kafka_conf = build_kafka_conf(outputs, ca_cert_path)
+    # ── Build Kafka configs (separate to avoid rdkafka producer-key warnings) ──
+    producer_conf = build_producer_conf(outputs, ca_cert_path, client_cert_path, client_key_path)
+    consumer_conf = build_consumer_conf(outputs, ca_cert_path, client_cert_path, client_key_path)
 
     # ── Verify initial plan ───────────────────────────────────────────────────
     current_plan = client.get_current_plan(service_name)
@@ -319,7 +346,8 @@ def main() -> None:
                 from_plan=from_plan,
                 to_plan=to_plan,
                 direction=direction,
-                kafka_conf=kafka_conf,
+                producer_conf=producer_conf,
+                consumer_conf=consumer_conf,
                 topic=topic,
                 aiven_client=client,
                 service_name=service_name,

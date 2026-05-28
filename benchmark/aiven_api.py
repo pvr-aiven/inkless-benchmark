@@ -50,9 +50,9 @@ class AivenClient:
         resp.raise_for_status()
         return resp.json()
 
-    def _patch(self, body: dict, *parts: str) -> dict:
+    def _put(self, body: dict, *parts: str) -> dict:
         url = self._url(*parts)
-        resp = self._session.patch(url, json=body, timeout=30)
+        resp = self._session.put(url, json=body, timeout=30)
         resp.raise_for_status()
         return resp.json()
 
@@ -66,16 +66,6 @@ class AivenClient:
         """Return the current service state string, e.g. RUNNING, REBUILDING."""
         return self.get_service(service_name)["state"]
 
-    def get_ca_cert(self, service_name: str) -> str:
-        """
-        Fetch the CA certificate PEM string for the given service.
-
-        The certificate is used by the Kafka producer and consumer to
-        establish a trusted SSL connection.
-        """
-        data = self._get("service", service_name, "ca")
-        return data["certificate"]
-
     def change_plan(self, service_name: str, new_plan: str) -> float:
         """
         Request a plan change on the Aiven API.
@@ -85,7 +75,7 @@ class AivenClient:
         """
         logger.info("Requesting plan change → %s for service %s", new_plan, service_name)
         trigger_ts = time.time()
-        self._patch({"plan": new_plan}, "service", service_name)
+        self._put({"plan": new_plan}, "service", service_name)
         return trigger_ts
 
     def poll_until_running(
@@ -94,9 +84,17 @@ class AivenClient:
         timeout: int = _DEFAULT_TIMEOUT,
         poll_interval: int = _DEFAULT_POLL_INTERVAL,
         start_time: Optional[float] = None,
+        transition_wait: int = 120,
     ) -> float:
         """
-        Block until the service state returns to RUNNING.
+        Block until the service completes a plan migration and returns to RUNNING.
+
+        Two-phase polling to avoid a race condition where the service state has
+        not yet left RUNNING after the plan-change API call:
+
+          Phase 1 — wait for state to leave RUNNING (migration has started).
+                     Gives up after *transition_wait* seconds and moves on.
+          Phase 2 — wait for state to return to RUNNING (migration complete).
 
         Returns the duration in seconds from *start_time* (or now) until
         the service is RUNNING again.
@@ -106,6 +104,25 @@ class AivenClient:
         t0 = start_time or time.time()
         deadline = t0 + timeout
 
+        # ── Phase 1: wait for state to leave RUNNING ──────────────────────────
+        transition_deadline = t0 + transition_wait
+        logger.info("Phase 1: waiting for service to leave RUNNING …")
+        while True:
+            state = self.get_service_state(service_name)
+            if state != "RUNNING":
+                logger.info("  Service entered state: %s — migration started", state)
+                break
+            if time.time() > transition_deadline:
+                logger.warning(
+                    "Service still RUNNING after %ds — migration may not have started yet; "
+                    "proceeding to Phase 2 anyway",
+                    transition_wait,
+                )
+                break
+            time.sleep(poll_interval)
+
+        # ── Phase 2: wait for state to return to RUNNING ──────────────────────
+        logger.info("Phase 2: waiting for service to return to RUNNING …")
         while True:
             state = self.get_service_state(service_name)
             elapsed = time.time() - t0

@@ -89,16 +89,26 @@ class BenchmarkConsumer:
 
     def _get_lag(self, consumer: Consumer, partitions) -> Dict[int, int]:
         """
-        Compute per-partition lag.
+        Compute per-partition lag: lag = high_watermark − current_position.
 
-        lag = high_watermark − current_position
+        During plan migration, partition leaders move between brokers and
+        get_watermark_offsets may raise NOT_LEADER_FOR_PARTITION or similar
+        errors. These are transient — return an empty dict so the caller
+        records a gap rather than crashing the consumer thread.
         """
+        from confluent_kafka import KafkaException
         lag: Dict[int, int] = {}
         for tp in partitions:
-            low, high = consumer.get_watermark_offsets(tp, timeout=5.0)
-            pos_list = consumer.position([tp])
-            current = pos_list[0].offset if pos_list else low
-            lag[tp.partition] = max(0, high - current)
+            try:
+                low, high = consumer.get_watermark_offsets(tp, timeout=5.0)
+                pos_list = consumer.position([tp])
+                current = pos_list[0].offset if pos_list else low
+                lag[tp.partition] = max(0, high - current)
+            except KafkaException as exc:
+                logger.debug(
+                    "Skipping lag for partition %d during migration: %s",
+                    tp.partition, exc,
+                )
         return lag
 
     def _run(self) -> None:
@@ -111,7 +121,13 @@ class BenchmarkConsumer:
 
         try:
             while not self._stop_event.is_set():
-                msg = consumer.poll(timeout=POLL_TIMEOUT_SEC)
+                try:
+                    msg = consumer.poll(timeout=POLL_TIMEOUT_SEC)
+                except Exception as exc:
+                    # Transient errors (e.g. SSL disconnect during broker restart)
+                    # are handled by librdkafka internally; log and continue.
+                    logger.warning("consumer.poll exception (transient): %s", exc)
+                    continue
 
                 if msg is None:
                     pass  # timeout — no message, continue

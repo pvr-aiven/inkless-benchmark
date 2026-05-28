@@ -6,9 +6,9 @@ directory and generates a PDF report in the Aiven benchmark report style.
 
 Sections:
   1. Header — title, run metadata, key result banner
-  2. Executive Summary — migration duration and availability per run
+  2. Executive Summary — plan change duration and availability per run
   3. Test Methodology — parameters, values and rationale
-  4. How Aiven Plan Migration Works — Inkless architecture and migration process
+  4. How Aiven Plan Scaling Works — Inkless architecture and plan change process
   5. Upgrade / Downgrade sections — metrics table, observations, embedded charts
   6. Technical Details — plan table, Inkless vs classic topics, considerations
 
@@ -267,7 +267,7 @@ def chart_duration_bars(events: list) -> io.BytesIO:
     down = mpatches.Patch(color=CHART_C['downgrade'], label='Downgrade')
     ax.legend(handles=[up, down], fontsize=8)
     ax.set_ylabel('Duration (s)', fontsize=8)
-    ax.set_title('Migration duration by direction and throughput', fontsize=9, fontweight='bold')
+    ax.set_title('Plan change duration by direction and throughput', fontsize=9, fontweight='bold')
     ax.grid(axis='y', linestyle='--', alpha=0.4)
     ax.tick_params(labelsize=8)
     fig.tight_layout()
@@ -286,7 +286,7 @@ def build_header(events: list) -> list:
     to_plan     = events[0].get('to_plan',   '—') if events else '—'
 
     story = [
-        P('Aiven for Kafka Inkless: Plan Migration Benchmark', 'title'),
+        P('Aiven for Kafka Inkless: Plan Scaling Benchmark', 'title'),
         P(f'Date: {run_date} &nbsp;|&nbsp; Region: {hyperscaler} {region}'
           f' &nbsp;|&nbsp; Plans: {from_plan} &#8596; {to_plan}', 'meta'),
     ]
@@ -299,7 +299,7 @@ def build_header(events: list) -> list:
         else:
             dur_str = f'~{max_dur/60:.1f} min'
         banner_text = (
-            f'Key Result: {dur_str} to migrate. '
+            f'Key Result: {dur_str} to scale up/down. '
             f'Producer active throughout. Zero consumer gaps.'
         )
     else:
@@ -351,9 +351,9 @@ def build_executive_summary(events: list) -> list:
     if len(events) >= 2:
         avg_dur = sum(e['duration_sec'] for e in events) / len(events)
         story.append(P(
-            f'<b>Duration projection:</b> Average migration time was {avg_dur:.0f}s '
+            f'<b>Duration projection:</b> Average plan change duration was {avg_dur:.0f}s '
             f'({avg_dur/60:.1f} min). Because Inkless stores data in object storage, '
-            f'migration time reflects control-plane reprovisioning speed — '
+            f'plan change duration reflects control-plane reprovisioning speed — '
             f'not data volume. Extrapolate linearly for capacity planning.',
             'note'))
     return story
@@ -371,14 +371,14 @@ def build_methodology(events: list) -> list:
     col_w   = [CW * 0.22, CW * 0.38, CW * 0.40]
     rows = [
         ['Plans',         f'{from_plan} &#8596; {to_plan}', 'Covers lower ingress tiers (1&#8211;5 MB/s)'],
-        ['Directions',    'Upgrade, then downgrade',         'Verify bidirectional migration'],
-        ['Ingress loads', tp_str,                            'Stress migration under different write pressures'],
-        ['Stabilization', '30 s pre/post migration',         'Allow steady state before triggering'],
+        ['Directions',    'Upgrade, then downgrade',         'Verify bidirectional plan scaling'],
+        ['Ingress loads', tp_str,                            'Stress plan scaling under different write pressures'],
+        ['Stabilization', '30 s pre/post plan change',       'Allow steady state before triggering'],
         ['Message size',  '10 KB',                           'Typical event payload size'],
         ['Partitions',    '6',                               'Distributed load across topic'],
         ['Topic type',    'Diskless (Inkless)',               'Data stored directly in cloud object storage'],
         ['Producer acks', 'all',                             'Strongest durability guarantee'],
-        ['Retries',       '10 (500 ms backoff)',             'Transparent reconnect through migration window'],
+        ['Retries',       '10 (500 ms backoff)',             'Transparent reconnect through the scaling window'],
         ['Client',        'confluent-kafka (Python)',         'Standard Kafka client, no Inkless-specific code'],
         ['Sampling',      '5 s intervals',                   'Producer and consumer metrics captured every 5 s'],
     ]
@@ -393,7 +393,7 @@ def build_methodology(events: list) -> list:
 
 
 def build_how_it_works() -> list:
-    story = section_heading('How Aiven Plan Migration Works')
+    story = section_heading('How Aiven Plan Scaling Works')
 
     story.append(callout([
         P('Architecture: Inkless Kafka (Diskless)', 'h3'),
@@ -402,7 +402,7 @@ def build_how_it_works() -> list:
           'separating compute from storage. This is what makes plan changes fast: '
           'there is no data to move between nodes.', 'body'),
         P('&nbsp;&#8226; <b>Diskless topics:</b> data written to object storage, not broker disks', 'body'),
-        P('&nbsp;&#8226; <b>No partition rebalance:</b> only compute resources change during migration', 'body'),
+        P('&nbsp;&#8226; <b>No partition rebalance:</b> only compute resources change during a plan scale-up/down', 'body'),
         P('&nbsp;&#8226; <b>Standard Kafka API:</b> producers and consumers use unmodified clients', 'body'),
         P('&nbsp;&#8226; <b>Replication factor 1:</b> durability is provided by object storage, not replicas', 'body'),
     ], BLUE_BG, BLUE_BDR))
@@ -410,15 +410,15 @@ def build_how_it_works() -> list:
     story.append(Spacer(1, 8))
 
     story.append(callout([
-        P('Migration Process (Plan Change)', 'h3'),
-        P('1. <b>API request:</b> PUT /service/{name} with the new plan name triggers the migration.', 'body'),
+        P('Plan Scale-Up / Scale-Down Process', 'h3'),
+        P('1. <b>API request:</b> PUT /service/{name} with the new plan name triggers the plan change.', 'body'),
         P('2. <b>Provisioning:</b> Aiven spins up broker infrastructure at the new plan capacity.', 'body'),
         P('3. <b>Transition:</b> Service enters REBUILDING state. Existing connections drop briefly.', 'body'),
         P('4. <b>Recovery:</b> Service returns to RUNNING. Producers reconnect within seconds.', 'body'),
         P('5. <b>Consumers:</b> Resume from last committed offset. Zero data loss.', 'body'),
-        P('<br/><b>Key insight:</b> Migration duration is driven by control-plane provisioning speed, '
+        P('<br/><b>Key insight:</b> Plan change duration is driven by control-plane provisioning speed, '
           'not by ingress throughput or topic size. '
-          'A service with 1 TB of data migrates in the same time as an empty one.', 'body'),
+          'A service with 1 TB of data scales in the same time as an empty one.', 'body'),
     ], YELLOW_BG, YELLOW_BDR))
 
     story.append(Spacer(1, 8))
@@ -442,7 +442,7 @@ def _observations_callout(direction: str, events: list,
 
         lines.append(P(
             f'<b>{tp:.0f} MB/s run:</b> '
-            f'{dur:.0f}s ({dur/60:.1f} min) migration. '
+            f'{dur:.0f}s ({dur/60:.1f} min) to scale. '
             f'Average producer throughput {avg_mbps:.2f} MB/s. '
             f'Errors: {"0" if p_errors == 0 else str(p_errors)}. '
             f'Consumer gaps: {"none" if c_gaps == 0 else str(c_gaps)}. '
@@ -451,10 +451,10 @@ def _observations_callout(direction: str, events: list,
 
     key_insight = (
         '<b>Key insight:</b> Producers maintained target throughput throughout '
-        'the migration window. After the brief reconnect, delivery resumed with '
+        'the scaling window. After the brief reconnect, delivery resumed with '
         'no permanent backlog.'
         if direction == 'upgrade' else
-        '<b>Key insight:</b> Downgrade duration is symmetric with upgrade — '
+        '<b>Key insight:</b> Scale-down duration is symmetric with scale-up — '
         'the control-plane reprovisioning time dominates in both directions. '
         'Consumers resumed from committed offsets with no data loss.'
     )
@@ -568,7 +568,7 @@ def build_technical_details(events: list) -> list:
     comp_rows = [
         ['Storage',          'Cloud object storage (GCS/S3/Azure)', 'Remote storage (managed tiered)'],
         ['Replication',      '1 (object storage provides durability)', '3 (broker-managed)'],
-        ['Migration impact', 'No data movement — compute only',       'Partition rebalance required'],
+        ['Plan change impact', 'No data movement — compute only',      'Partition rebalance required'],
         ['Log compaction',   'Not supported',                          'Supported'],
         ['Local retention',  'N/A — no local disk',                    'Configurable'],
         ['Best for',         'High-throughput event streams',          'Workloads requiring compaction'],
@@ -578,13 +578,13 @@ def build_technical_details(events: list) -> list:
 
     # Migration triggers
     story.append(callout([
-        P('Migration Triggers', 'h3'),
-        P('Aiven does not auto-scale. Plan changes must be triggered explicitly via:', 'body'),
+        P('Plan Change Triggers', 'h3'),
+        P('Aiven does not auto-scale. Plan scale-ups and scale-downs must be triggered explicitly via:', 'body'),
         P('&nbsp;&#8226; <b>Console:</b> manual plan change in the Aiven Console', 'body'),
         P('&nbsp;&#8226; <b>API:</b> PUT /v1/project/{project}/service/{service} with the new plan', 'body'),
         P('&nbsp;&#8226; <b>Terraform:</b> update the <i>plan</i> attribute in the <i>aiven_kafka</i> resource', 'body'),
         P('&nbsp;&#8226; <b>CLI:</b> avn service update &#8209;&#8209;plan &lt;plan&gt;', 'body'),
-        P('Because migrations are zero-data-movement, upgrades can be triggered '
+        P('Because plan changes are zero-data-movement, scale-ups can be triggered '
           'proactively — for example, when ingress approaches 80% of plan capacity.', 'body'),
     ], BLUE_BG, BLUE_BDR))
 
@@ -593,7 +593,7 @@ def build_technical_details(events: list) -> list:
     # Considerations
     story.append(callout([
         P('Considerations', 'h3'),
-        P('&nbsp;&#8226; <b>Migration duration:</b> Driven by control-plane provisioning, not data volume. '
+        P('&nbsp;&#8226; <b>Plan change duration:</b> Driven by control-plane provisioning, not data volume. '
           'Typically 5&#8211;15 minutes, independent of topic size.', 'body'),
         P('&nbsp;&#8226; <b>Client reconnection:</b> Standard Kafka clients reconnect automatically '
           'after the REBUILDING window. No application code changes required.', 'body'),
@@ -648,7 +648,7 @@ def main() -> None:
         pagesize=A4,
         leftMargin=M, rightMargin=M,
         topMargin=M,  bottomMargin=M,
-        title='Aiven for Kafka Inkless: Plan Migration Benchmark',
+        title='Aiven for Kafka Inkless: Plan Scaling Benchmark',
         author='Aiven Benchmark Pipeline',
     )
 
